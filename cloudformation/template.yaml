@@ -1,0 +1,99 @@
+tAWSTemplateFormatVersion: '2010-09-09'
+Description: Script Evaluation App (S3 + Lambda + API Gateway)
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: SCRIPT_BUCKET_NAME
+Resources:
+
+  ScriptBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ScriptEvaluationLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3AndBedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub arn:aws:s3:::${BucketName}/*
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  ScriptEvaluationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ScriptEvaluationFunction
+      Runtime: python3.12
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: lambda_function.lambda_handler
+      Code:
+        S3Bucket: YOUR_DEPLOYMENT_BUCKET_NAME
+        S3Key: lambda-deployment-package.zip
+      Timeout: 30
+      Environment:
+        Variables:
+          SCRIPT_BUCKET_NAME: !Ref BucketName
+
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: ScriptEvaluationAPI
+
+  LambdaApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId:
+        Fn::GetAtt:
+          - ApiGateway
+          - RootResourceId
+      PathPart: analyze
+      RestApiId: !Ref ApiGateway
+
+  LambdaPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: POST
+      ResourceId: !Ref LambdaApiResource
+      RestApiId: !Ref ApiGateway
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri:
+          Fn::Sub:
+            - arn:aws:apigateway:${Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+            - Region: !Ref "AWS::Region"
+              LambdaArn: !GetAtt ScriptEvaluationFunction.Arn
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScriptEvaluationFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/POST/analyze
